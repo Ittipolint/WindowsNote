@@ -3,7 +3,6 @@ import os
 import shutil
 import uuid
 import base64
-import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -304,6 +303,9 @@ class WindowsNoteApp(tk.Tk):
         self.ink_strokes = []
         self.ink_images = []
         self.ink_image_cache = {}
+        self.ink_image_items = {}
+        self.selected_image_id = None
+        self.selected_image_outline = None
         self.dragging_image_id = None
         self.dragging_offset = (0, 0)
         self.current_stroke = None
@@ -364,10 +366,6 @@ class WindowsNoteApp(tk.Tk):
 
         toolbar = ttk.Frame(self)
         toolbar.pack(fill=tk.X, padx=8, pady=(0, 4))
-        ttk.Button(toolbar, text="B", command=lambda: self.apply_text_tag("bold")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="I", command=lambda: self.apply_text_tag("italic")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="U", command=lambda: self.apply_text_tag("underline")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Highlight", command=lambda: self.apply_text_tag("highlight")).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Save", command=self.save_current_page).pack(side=tk.LEFT, padx=8)
         ttk.Button(toolbar, text="Save As", command=self.save_as_page).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Print PDF", command=self.print_to_pdf).pack(side=tk.LEFT, padx=2)
@@ -388,22 +386,22 @@ class WindowsNoteApp(tk.Tk):
         self.pen_size_spin = ttk.Spinbox(toolbar, from_=1, to=24, width=4, textvariable=self.pen_size_var)
         self.pen_size_spin.pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Insert Image", command=self.insert_image_at_cursor).pack(side=tk.LEFT, padx=6)
+        ttk.Button(toolbar, text="Delete Image", command=self.delete_selected_image).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Clear Ink", command=self.clear_ink).pack(side=tk.LEFT, padx=6)
         ttk.Label(toolbar, text=f"Version {APP_VERSION}").pack(side=tk.RIGHT, padx=4)
 
         main_paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         main_paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        nav_paned = ttk.Panedwindow(main_paned, orient=tk.HORIZONTAL)
-        right = ttk.Frame(main_paned)
+        notebook_frame = ttk.Frame(main_paned)
+        right_paned = ttk.Panedwindow(main_paned, orient=tk.HORIZONTAL)
+        pages_frame = ttk.Frame(right_paned)
+        right = ttk.Frame(right_paned)
 
-        notebook_frame = ttk.Frame(nav_paned)
-        pages_frame = ttk.Frame(nav_paned)
-        nav_paned.add(notebook_frame, weight=3)
-        nav_paned.add(pages_frame, weight=2)
-
-        main_paned.add(nav_paned, weight=4)
-        main_paned.add(right, weight=8)
+        main_paned.add(notebook_frame, weight=3)
+        main_paned.add(right_paned, weight=9)
+        right_paned.add(pages_frame, weight=2)
+        right_paned.add(right, weight=8)
 
         ttk.Label(notebook_frame, text="Notebooks / Sections").pack(anchor=tk.W)
         self.tree = ttk.Treeview(notebook_frame, show="tree")
@@ -427,6 +425,7 @@ class WindowsNoteApp(tk.Tk):
         ttk.Button(page_btns, text="+ Page", command=self.add_page).pack(side=tk.LEFT, padx=2)
         ttk.Button(page_btns, text="Rename", command=self.rename_page).pack(side=tk.LEFT, padx=2)
         ttk.Button(page_btns, text="Delete", command=self.delete_page).pack(side=tk.LEFT, padx=2)
+        ttk.Button(page_btns, text="Delete Section", command=self.delete_current_section).pack(side=tk.LEFT, padx=2)
 
         title_frame = ttk.Frame(right)
         title_frame.pack(fill=tk.X)
@@ -438,7 +437,7 @@ class WindowsNoteApp(tk.Tk):
 
         page_frame = ttk.Frame(right)
         page_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
-        ttk.Label(page_frame, text="Page (Text + Ink + Images)").grid(row=0, column=0, sticky="w")
+        ttk.Label(page_frame, text="Page (Ink + Images)").grid(row=0, column=0, sticky="w")
 
         self.page_canvas = tk.Canvas(page_frame, bg="#f7f7f7", cursor="pencil")
         page_y = ttk.Scrollbar(page_frame, orient=tk.VERTICAL, command=self.page_canvas.yview)
@@ -450,16 +449,10 @@ class WindowsNoteApp(tk.Tk):
         page_frame.rowconfigure(1, weight=1)
         page_frame.columnconfigure(0, weight=1)
 
-        self.text_area_height = 1400
-        self.ink_start_y = self.text_area_height + 40
-        self.page_canvas.create_rectangle(10, 10, 4010, self.text_area_height, fill="white", outline="#d1d5db", tags=("pagebg",))
-        self.page_canvas.create_rectangle(
-            10, self.ink_start_y, 4010, 6100, fill="white", outline="#d1d5db", tags=("inkbg",)
-        )
-
-        self.editor = tk.Text(self.page_canvas, wrap=tk.NONE, undo=True)
-        self.editor_window_id = self.page_canvas.create_window(20, 20, anchor=tk.NW, width=3980, height=1360, window=self.editor)
-        self.editor.bind("<<Modified>>", self._on_text_modified)
+        self.ink_start_y = 20
+        self.page_canvas.create_rectangle(10, 10, 4010, 6100, fill="white", outline="#d1d5db", tags=("inkbg",))
+        self.page_canvas.create_text(20, 14, anchor=tk.W, text="Ink Area (draw here)", fill="#4b5563")
+        self.editor = None
 
         self.ink_canvas = self.page_canvas
         self.canvas_cursor = (80, self.ink_start_y + 80)
@@ -489,12 +482,20 @@ class WindowsNoteApp(tk.Tk):
         create_menu.add_command(label="New Page", command=self.add_page)
         menubar.add_cascade(label="Create", menu=create_menu)
 
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        edit_menu.add_command(label="Delete Section", command=self.delete_current_section)
+        edit_menu.add_command(label="Delete Page", command=self.delete_current_page)
+        edit_menu.add_command(label="Delete Selected Image", command=self.delete_selected_image)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+
         self.config(menu=menubar)
 
     def _bind_shortcuts(self):
         self.bind("<Control-s>", lambda _e: self.save_current_page())
 
     def _setup_text_tags(self):
+        if not self.editor:
+            return
         base_font = tkfont.nametofont("TkTextFont")
         bold_font = tkfont.Font(self.editor, base_font)
         bold_font.configure(weight="bold")
@@ -509,6 +510,8 @@ class WindowsNoteApp(tk.Tk):
         self.editor.tag_configure("highlight", background="#fff3a3")
 
     def apply_text_tag(self, tag_name: str):
+        if not self.editor:
+            return
         try:
             start, end = self.editor.index("sel.first"), self.editor.index("sel.last")
         except tk.TclError:
@@ -533,6 +536,8 @@ class WindowsNoteApp(tk.Tk):
         self.ink_strokes = []
         self.ink_images = []
         self.ink_image_cache = {}
+        self.ink_image_items = {}
+        self._clear_image_selection()
         self.ink_canvas.delete("inkstroke")
         self.ink_canvas.delete("ink_image")
         self._queue_autosave()
@@ -545,10 +550,15 @@ class WindowsNoteApp(tk.Tk):
         self.canvas_cursor = (x, y)
         hit_image_id = self._image_id_at(x, y)
         if hit_image_id:
+            self._select_image(hit_image_id)
             self.dragging_image_id = hit_image_id
-            item_x, item_y = self.ink_canvas.coords(f"inkimg:{hit_image_id}")
+            item_id = self.ink_image_items.get(hit_image_id)
+            if not item_id:
+                return
+            item_x, item_y = self.ink_canvas.coords(item_id)
             self.dragging_offset = (x - int(item_x), y - int(item_y))
             return
+        self._clear_image_selection()
         if y < self.ink_start_y:
             return
         if self.current_tool.get() == "eraser":
@@ -626,13 +636,17 @@ class WindowsNoteApp(tk.Tk):
         return None
 
     def _move_image(self, image_id: str, x: int, y: int):
-        self.ink_canvas.coords(f"inkimg:{image_id}", x, y)
+        item_id = self.ink_image_items.get(image_id)
+        if not item_id:
+            return
+        self.ink_canvas.coords(item_id, x, y)
         self._raise_ink_layers()
         for img in self.ink_images:
             if img.get("id") == image_id:
                 img["x"] = x
                 img["y"] = y
                 break
+        self._update_selected_image_outline()
 
     def _erase_strokes_at(self, x: int, y: int):
         radius = max(8, int(self.pen_size_var.get()) * 2)
@@ -685,15 +699,6 @@ class WindowsNoteApp(tk.Tk):
         self.canvas_cursor = (int(self.ink_canvas.canvasx(event.x)), int(self.ink_canvas.canvasy(event.y)))
 
     def _cursor_canvas_position(self):
-        if self.focus_get() == self.editor:
-            try:
-                box = self.editor.bbox("insert")
-            except tk.TclError:
-                box = None
-            if box:
-                ex, ey, _w, h = box
-                wx, wy = self.ink_canvas.coords(self.editor_window_id)
-                return int(wx + ex), int(wy + ey + h)
         return self.canvas_cursor
 
     def insert_image_at_cursor(self):
@@ -718,6 +723,7 @@ class WindowsNoteApp(tk.Tk):
         image_meta = {"id": uuid.uuid4().hex[:10], "asset": asset, "x": x, "y": y}
         self.ink_images.append(image_meta)
         self._draw_canvas_image(image_meta)
+        self._select_image(image_meta["id"])
         self._queue_autosave()
 
     def _draw_canvas_image(self, image_meta: dict):
@@ -741,8 +747,49 @@ class WindowsNoteApp(tk.Tk):
         self.ink_image_cache[image_id] = tk_image
         x = int(image_meta.get("x", 50))
         y = int(image_meta.get("y", 50))
-        self.ink_canvas.create_image(x, y, image=tk_image, anchor=tk.NW, tags=("ink_image", f"inkimg:{image_id}"))
+        item_id = self.ink_canvas.create_image(
+            x, y, image=tk_image, anchor=tk.NW, tags=("ink_image", f"inkimg:{image_id}")
+        )
+        self.ink_image_items[image_id] = item_id
         self._raise_ink_layers()
+
+    def _select_image(self, image_id: str):
+        self.selected_image_id = image_id
+        self._update_selected_image_outline()
+
+    def _clear_image_selection(self):
+        self.selected_image_id = None
+        if self.selected_image_outline:
+            self.ink_canvas.delete(self.selected_image_outline)
+            self.selected_image_outline = None
+
+    def _update_selected_image_outline(self):
+        if self.selected_image_outline:
+            self.ink_canvas.delete(self.selected_image_outline)
+            self.selected_image_outline = None
+        if not self.selected_image_id:
+            return
+        item_id = self.ink_image_items.get(self.selected_image_id)
+        if not item_id:
+            return
+        bbox = self.ink_canvas.bbox(item_id)
+        if not bbox:
+            return
+        self.selected_image_outline = self.ink_canvas.create_rectangle(
+            bbox[0] - 2, bbox[1] - 2, bbox[2] + 2, bbox[3] + 2, outline="#2563eb", width=2, dash=(4, 2)
+        )
+        self.ink_canvas.tag_raise(self.selected_image_outline)
+
+    def delete_selected_image(self):
+        if not self.selected_image_id:
+            return
+        target = self.selected_image_id
+        item_id = self.ink_image_items.pop(target, None)
+        if item_id:
+            self.ink_canvas.delete(item_id)
+        self.ink_images = [img for img in self.ink_images if img.get("id") != target]
+        self._clear_image_selection()
+        self._queue_autosave()
 
     def _draw_stroke(self, stroke: dict):
         points = stroke.get("points", [])
@@ -767,8 +814,10 @@ class WindowsNoteApp(tk.Tk):
         self._raise_ink_layers()
 
     def _raise_ink_layers(self):
-        self.ink_canvas.tag_raise("inkstroke")
         self.ink_canvas.tag_raise("ink_image")
+        self.ink_canvas.tag_raise("inkstroke")
+        if self.selected_image_outline:
+            self.ink_canvas.tag_raise(self.selected_image_outline)
 
     def _load_ink_for_current_page(self):
         self.ink_canvas.delete("inkstroke")
@@ -776,6 +825,8 @@ class WindowsNoteApp(tk.Tk):
         self.ink_strokes = []
         self.ink_images = []
         self.ink_image_cache = {}
+        self.ink_image_items = {}
+        self._clear_image_selection()
         if not (self.selected_notebook_id and self.selected_section_id and self.selected_page_id):
             return
         payload = self.storage.load_ink_payload(self.selected_notebook_id, self.selected_section_id, self.selected_page_id)
@@ -955,20 +1006,6 @@ class WindowsNoteApp(tk.Tk):
         self.is_loading_page = True
         try:
             self.page_title_var.set(page.title)
-            self.editor.delete("1.0", tk.END)
-            self.editor.insert("1.0", page.content)
-            for tag in TEXT_TAGS:
-                self.editor.tag_remove(tag, "1.0", tk.END)
-            for span in page.formatting:
-                tag = span.get("tag")
-                start = span.get("start")
-                end = span.get("end")
-                if tag in TEXT_TAGS and start and end:
-                    try:
-                        self.editor.tag_add(tag, start, end)
-                    except tk.TclError:
-                        pass
-            self.editor.edit_modified(False)
             self._load_ink_for_current_page()
         finally:
             self.is_loading_page = False
@@ -1001,11 +1038,35 @@ class WindowsNoteApp(tk.Tk):
             self._clear_editor()
         self.refresh_pages()
 
+    def delete_current_page(self):
+        self.delete_page()
+
+    def delete_current_section(self):
+        if not (self.selected_notebook_id and self.selected_section_id):
+            messagebox.showinfo("Info", "Select a section first.")
+            return
+        section_title = ""
+        for sec in self.storage.list_sections(self.selected_notebook_id):
+            if sec["id"] == self.selected_section_id:
+                section_title = sec["title"]
+                break
+        label = section_title or self.selected_section_id
+        if not messagebox.askyesno("Confirm Delete", f"Delete section '{label}' and all pages?"):
+            return
+        self.storage.delete_section(self.selected_notebook_id, self.selected_section_id)
+        self.selected_section_id = None
+        self.selected_page_id = None
+        self._clear_editor()
+        self.refresh_notebooks()
+        self.refresh_pages()
+
     def _on_page_text_change(self, _event=None):
         if not self.is_loading_page:
             self._queue_autosave()
 
     def _on_text_modified(self, _event=None):
+        if not self.editor:
+            return
         if self.is_loading_page:
             self.editor.edit_modified(False)
             return
@@ -1026,8 +1087,8 @@ class WindowsNoteApp(tk.Tk):
             return
 
         title = sanitize_title(self.page_title_var.get())
-        content = self.editor.get("1.0", "end-1c")
-        formatting = self._collect_formatting_ranges()
+        content = ""
+        formatting = []
         self.storage.save_page(
             self.selected_notebook_id,
             self.selected_section_id,
@@ -1100,8 +1161,8 @@ class WindowsNoteApp(tk.Tk):
             "page": {
                 "id": self.selected_page_id,
                 "title": sanitize_title(self.page_title_var.get()),
-                "content": self.editor.get("1.0", "end-1c"),
-                "formatting": self._collect_formatting_ranges(),
+                "content": "",
+                "formatting": [],
             },
             "ink": {"strokes": self.ink_strokes, "images": image_items},
         }
@@ -1116,14 +1177,10 @@ class WindowsNoteApp(tk.Tk):
             messagebox.showinfo("Info", "Select a page first.")
             return
 
-        paper = simpledialog.askstring("Paper Size", "Choose paper size: A4, LETTER, LEGAL, A5", parent=self)
+        paper = self._ask_paper_size()
         if not paper:
             return
-        paper = paper.strip().upper()
         size_map = {"A4": A4, "LETTER": LETTER, "LEGAL": LEGAL, "A5": A5}
-        if paper not in size_map:
-            messagebox.showerror("Invalid Size", "Supported sizes: A4, LETTER, LEGAL, A5")
-            return
 
         target = filedialog.asksaveasfilename(
             title="Print to PDF",
@@ -1144,18 +1201,7 @@ class WindowsNoteApp(tk.Tk):
         c.drawString(margin, y, sanitize_title(self.page_title_var.get()))
         y -= 24
 
-        c.setFont("Helvetica", 10)
         usable_w = page_w - (margin * 2)
-        wrap_chars = max(40, int(usable_w / 5.2))
-        for raw_line in self.editor.get("1.0", "end-1c").splitlines() or [""]:
-            lines = textwrap.wrap(raw_line, width=wrap_chars) or [""]
-            for line in lines:
-                if y < margin + 120:
-                    c.showPage()
-                    y = page_h - margin
-                    c.setFont("Helvetica", 10)
-                c.drawString(margin, y, line)
-                y -= 14
 
         if PIL_AVAILABLE:
             ink_img = self._render_ink_image()
@@ -1174,6 +1220,38 @@ class WindowsNoteApp(tk.Tk):
 
         c.save()
 
+    def _ask_paper_size(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("Select Paper Size")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        ttk.Label(dialog, text="Paper size:").grid(row=0, column=0, padx=10, pady=(10, 4), sticky="w")
+        paper_var = tk.StringVar(value="A4")
+        combo = ttk.Combobox(dialog, textvariable=paper_var, values=["A4", "LETTER", "LEGAL", "A5"], state="readonly")
+        combo.grid(row=1, column=0, padx=10, pady=4, sticky="ew")
+        combo.current(0)
+        combo.focus_set()
+
+        result = {"value": None}
+
+        def on_ok():
+            result["value"] = paper_var.get()
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        btns = ttk.Frame(dialog)
+        btns.grid(row=2, column=0, padx=10, pady=(8, 10), sticky="e")
+        ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Cancel", command=on_cancel).pack(side=tk.LEFT, padx=4)
+
+        dialog.columnconfigure(0, weight=1)
+        dialog.wait_window()
+        return result["value"]
+
     @staticmethod
     def _guess_mime(ext: str) -> str:
         return {
@@ -1186,6 +1264,8 @@ class WindowsNoteApp(tk.Tk):
         }.get(ext, "application/octet-stream")
 
     def _collect_formatting_ranges(self) -> list[dict]:
+        if not self.editor:
+            return []
         spans = []
         for tag in TEXT_TAGS:
             ranges = self.editor.tag_ranges(tag)
@@ -1195,13 +1275,16 @@ class WindowsNoteApp(tk.Tk):
 
     def _clear_editor(self):
         self.page_title_var.set("")
-        self.editor.delete("1.0", tk.END)
+        if self.editor:
+            self.editor.delete("1.0", tk.END)
         self.ink_canvas.delete("inkstroke")
         self.ink_canvas.delete("ink_image")
         self.ink_strokes = []
         self.ink_images = []
         self.ink_image_cache = {}
+        self.ink_image_items = {}
         self.dragging_image_id = None
+        self._clear_image_selection()
 
     def change_storage_folder(self):
         selected = filedialog.askdirectory(initialdir=str(self.storage_root), title="Choose note storage folder")
