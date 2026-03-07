@@ -2,26 +2,40 @@ import json
 import os
 import shutil
 import uuid
+import base64
+import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 import tkinter.font as tkfont
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageTk
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
     Image = Any
     ImageDraw = Any
+    ImageTk = Any
+
+try:
+    from reportlab.lib.pagesizes import A4, A5, LEGAL, LETTER
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas as pdf_canvas
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+    A4 = A5 = LEGAL = LETTER = None
+    ImageReader = Any
+    pdf_canvas = Any
 
 CONFIG_FILE = Path(__file__).resolve().parent.parent / "config.json"
 DEFAULT_DATA_ROOT = "./local_notes"
 TEXT_TAGS = ("bold", "italic", "underline", "highlight")
 DEFAULT_INK_COLOR = "#111827"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 
 def utc_now_iso() -> str:
@@ -170,6 +184,9 @@ class LocalNoteStorage:
             ink_json.unlink()
         if ink_png.exists():
             ink_png.unlink()
+        assets_dir = self._page_assets_dir(notebook_id, section_id, page_id)
+        if assets_dir.exists():
+            shutil.rmtree(assets_dir)
 
     def load_page(self, notebook_id: str, section_id: str, page_id: str) -> Page:
         path = self._page_path(notebook_id, section_id, page_id)
@@ -197,21 +214,48 @@ class LocalNoteStorage:
         }
         self._write_json(path, data)
 
-    def load_ink_strokes(self, notebook_id: str, section_id: str, page_id: str) -> list[dict]:
+    def load_ink_payload(self, notebook_id: str, section_id: str, page_id: str) -> dict:
         path = self._ink_json_path(notebook_id, section_id, page_id)
         payload = self._read_json(path, {})
         strokes = payload.get("strokes", [])
-        return strokes if isinstance(strokes, list) else []
+        images = payload.get("images", [])
+        return {
+            "strokes": strokes if isinstance(strokes, list) else [],
+            "images": images if isinstance(images, list) else [],
+        }
 
-    def save_ink_strokes(self, notebook_id: str, section_id: str, page_id: str, strokes: list[dict]) -> None:
+    def load_ink_strokes(self, notebook_id: str, section_id: str, page_id: str) -> list[dict]:
+        return self.load_ink_payload(notebook_id, section_id, page_id).get("strokes", [])
+
+    def save_ink_payload(
+        self, notebook_id: str, section_id: str, page_id: str, strokes: list[dict], images: list[dict]
+    ) -> None:
         path = self._ink_json_path(notebook_id, section_id, page_id)
-        data = {"page_id": page_id, "updated_at": utc_now_iso(), "strokes": strokes}
+        data = {"page_id": page_id, "updated_at": utc_now_iso(), "strokes": strokes, "images": images}
         self._write_json(path, data)
 
+    def save_ink_strokes(self, notebook_id: str, section_id: str, page_id: str, strokes: list[dict]) -> None:
+        payload = self.load_ink_payload(notebook_id, section_id, page_id)
+        self.save_ink_payload(notebook_id, section_id, page_id, strokes, payload.get("images", []))
+
     def save_ink_image(self, notebook_id: str, section_id: str, page_id: str, image: Any) -> None:
-        path = self._ink_png_path(notebook_id, section_id, page_id)
+        path = self.ink_png_path(notebook_id, section_id, page_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         image.save(path, format="PNG")
+
+    def ink_png_path(self, notebook_id: str, section_id: str, page_id: str) -> Path:
+        return self._ink_png_path(notebook_id, section_id, page_id)
+
+    def import_page_asset(self, notebook_id: str, section_id: str, page_id: str, source_path: Path) -> str:
+        ext = source_path.suffix.lower() or ".png"
+        filename = f"{uuid.uuid4().hex[:12]}{ext}"
+        target = self._page_assets_dir(notebook_id, section_id, page_id) / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target)
+        return filename
+
+    def page_asset_path(self, notebook_id: str, section_id: str, page_id: str, filename: str) -> Path:
+        return self._page_assets_dir(notebook_id, section_id, page_id) / filename
 
     def _page_path(self, notebook_id: str, section_id: str, page_id: str) -> Path:
         return self.notebooks_dir / notebook_id / "sections" / section_id / "pages" / f"{page_id}.json"
@@ -221,6 +265,9 @@ class LocalNoteStorage:
 
     def _ink_png_path(self, notebook_id: str, section_id: str, page_id: str) -> Path:
         return self.notebooks_dir / notebook_id / "sections" / section_id / "pages" / f"{page_id}_ink.png"
+
+    def _page_assets_dir(self, notebook_id: str, section_id: str, page_id: str) -> Path:
+        return self.notebooks_dir / notebook_id / "sections" / section_id / "pages" / f"{page_id}_assets"
 
     @staticmethod
     def _read_json(path: Path, fallback):
@@ -255,6 +302,10 @@ class WindowsNoteApp(tk.Tk):
         self.is_loading_page = False
         self.autosave_job = None
         self.ink_strokes = []
+        self.ink_images = []
+        self.ink_image_cache = {}
+        self.dragging_image_id = None
+        self.dragging_offset = (0, 0)
         self.current_stroke = None
         self.current_tool = tk.StringVar(value="pen")
         self.pen_size_var = tk.IntVar(value=4)
@@ -318,10 +369,13 @@ class WindowsNoteApp(tk.Tk):
         ttk.Button(toolbar, text="U", command=lambda: self.apply_text_tag("underline")).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Highlight", command=lambda: self.apply_text_tag("highlight")).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Save", command=self.save_current_page).pack(side=tk.LEFT, padx=8)
+        ttk.Button(toolbar, text="Save As", command=self.save_as_page).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Print PDF", command=self.print_to_pdf).pack(side=tk.LEFT, padx=2)
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
         ttk.Label(toolbar, text="Ink:").pack(side=tk.LEFT)
         ttk.Radiobutton(toolbar, text="Pen", value="pen", variable=self.current_tool).pack(side=tk.LEFT, padx=2)
         ttk.Radiobutton(toolbar, text="Eraser", value="eraser", variable=self.current_tool).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Pick Color", command=self.pick_ink_color).pack(side=tk.LEFT, padx=2)
         for color in ("#111827", "#2563eb", "#dc2626", "#15803d"):
             tk.Button(
                 toolbar,
@@ -333,38 +387,42 @@ class WindowsNoteApp(tk.Tk):
         ttk.Label(toolbar, text="Size").pack(side=tk.LEFT, padx=(8, 2))
         self.pen_size_spin = ttk.Spinbox(toolbar, from_=1, to=24, width=4, textvariable=self.pen_size_var)
         self.pen_size_spin.pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Insert Image", command=self.insert_image_at_cursor).pack(side=tk.LEFT, padx=6)
         ttk.Button(toolbar, text="Clear Ink", command=self.clear_ink).pack(side=tk.LEFT, padx=6)
         ttk.Label(toolbar, text=f"Version {APP_VERSION}").pack(side=tk.RIGHT, padx=4)
 
-        paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        main_paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        left = ttk.Frame(paned)
-        center = ttk.Frame(paned)
-        right = ttk.Frame(paned)
+        nav_paned = ttk.Panedwindow(main_paned, orient=tk.HORIZONTAL)
+        right = ttk.Frame(main_paned)
 
-        paned.add(left, weight=3)
-        paned.add(center, weight=2)
-        paned.add(right, weight=7)
+        notebook_frame = ttk.Frame(nav_paned)
+        pages_frame = ttk.Frame(nav_paned)
+        nav_paned.add(notebook_frame, weight=3)
+        nav_paned.add(pages_frame, weight=2)
 
-        ttk.Label(left, text="Notebooks / Sections").pack(anchor=tk.W)
-        self.tree = ttk.Treeview(left, show="tree")
+        main_paned.add(nav_paned, weight=4)
+        main_paned.add(right, weight=8)
+
+        ttk.Label(notebook_frame, text="Notebooks / Sections").pack(anchor=tk.W)
+        self.tree = ttk.Treeview(notebook_frame, show="tree")
         self.tree.pack(fill=tk.BOTH, expand=True)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
-        nb_btns = ttk.Frame(left)
+        nb_btns = ttk.Frame(notebook_frame)
         nb_btns.pack(fill=tk.X, pady=4)
         ttk.Button(nb_btns, text="+ Notebook", command=self.add_notebook).pack(side=tk.LEFT, padx=2)
         ttk.Button(nb_btns, text="+ Section", command=self.add_section).pack(side=tk.LEFT, padx=2)
         ttk.Button(nb_btns, text="Rename", command=self.rename_tree_item).pack(side=tk.LEFT, padx=2)
         ttk.Button(nb_btns, text="Delete", command=self.delete_tree_item).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(center, text="Pages").pack(anchor=tk.W)
-        self.pages_list = tk.Listbox(center)
+        ttk.Label(pages_frame, text="Pages").pack(anchor=tk.W)
+        self.pages_list = tk.Listbox(pages_frame)
         self.pages_list.pack(fill=tk.BOTH, expand=True)
         self.pages_list.bind("<<ListboxSelect>>", self.on_page_select)
 
-        page_btns = ttk.Frame(center)
+        page_btns = ttk.Frame(pages_frame)
         page_btns.pack(fill=tk.X, pady=4)
         ttk.Button(page_btns, text="+ Page", command=self.add_page).pack(side=tk.LEFT, padx=2)
         ttk.Button(page_btns, text="Rename", command=self.rename_page).pack(side=tk.LEFT, padx=2)
@@ -378,23 +436,39 @@ class WindowsNoteApp(tk.Tk):
         self.page_title_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
         self.page_title_entry.bind("<KeyRelease>", self._on_page_text_change)
 
-        self.editor_tabs = ttk.Notebook(right)
-        self.editor_tabs.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        content_paned = ttk.Panedwindow(right, orient=tk.VERTICAL)
+        content_paned.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
 
-        text_tab = ttk.Frame(self.editor_tabs)
-        ink_tab = ttk.Frame(self.editor_tabs)
-        self.editor_tabs.add(text_tab, text="Text")
-        self.editor_tabs.add(ink_tab, text="Ink")
+        text_frame = ttk.Frame(content_paned)
+        ink_frame = ttk.Frame(content_paned)
+        content_paned.add(text_frame, weight=3)
+        content_paned.add(ink_frame, weight=2)
 
-        self.editor = tk.Text(text_tab, wrap=tk.WORD, undo=True)
-        self.editor.pack(fill=tk.BOTH, expand=True)
+        self.editor = tk.Text(text_frame, wrap=tk.NONE, undo=True)
+        text_y = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.editor.yview)
+        text_x = ttk.Scrollbar(text_frame, orient=tk.HORIZONTAL, command=self.editor.xview)
+        self.editor.configure(yscrollcommand=text_y.set, xscrollcommand=text_x.set)
+        self.editor.grid(row=0, column=0, sticky="nsew")
+        text_y.grid(row=0, column=1, sticky="ns")
+        text_x.grid(row=1, column=0, sticky="ew")
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
         self.editor.bind("<<Modified>>", self._on_text_modified)
 
-        self.ink_canvas = tk.Canvas(ink_tab, bg="white", cursor="pencil")
-        self.ink_canvas.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(ink_frame, text="Ink + Image Layer").grid(row=0, column=0, sticky="w")
+        self.ink_canvas = tk.Canvas(ink_frame, bg="white", cursor="pencil")
+        ink_y = ttk.Scrollbar(ink_frame, orient=tk.VERTICAL, command=self.ink_canvas.yview)
+        ink_x = ttk.Scrollbar(ink_frame, orient=tk.HORIZONTAL, command=self.ink_canvas.xview)
+        self.ink_canvas.configure(yscrollcommand=ink_y.set, xscrollcommand=ink_x.set, scrollregion=(0, 0, 4000, 4000))
+        self.ink_canvas.grid(row=1, column=0, sticky="nsew")
+        ink_y.grid(row=1, column=1, sticky="ns")
+        ink_x.grid(row=2, column=0, sticky="ew")
+        ink_frame.rowconfigure(1, weight=1)
+        ink_frame.columnconfigure(0, weight=1)
         self.ink_canvas.bind("<ButtonPress-1>", self.on_ink_press)
         self.ink_canvas.bind("<B1-Motion>", self.on_ink_drag)
         self.ink_canvas.bind("<ButtonRelease-1>", self.on_ink_release)
+        self.ink_canvas.bind("<MouseWheel>", self._on_ink_mousewheel)
 
         self._setup_text_tags()
 
@@ -403,6 +477,8 @@ class WindowsNoteApp(tk.Tk):
 
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Save", command=self.save_current_page, accelerator="Ctrl+S")
+        file_menu.add_command(label="Save As...", command=self.save_as_page)
+        file_menu.add_command(label="Print to PDF...", command=self.print_to_pdf)
         file_menu.add_command(label="Change Local Storage Folder", command=self.change_storage_folder)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.destroy)
@@ -449,35 +525,55 @@ class WindowsNoteApp(tk.Tk):
         self.pen_color = color
         self.current_tool.set("pen")
 
+    def pick_ink_color(self):
+        chosen = colorchooser.askcolor(color=self.pen_color, title="Choose Ink Color", parent=self)
+        if chosen and chosen[1]:
+            self.set_ink_color(chosen[1])
+
     def clear_ink(self):
         self.ink_strokes = []
+        self.ink_images = []
+        self.ink_image_cache = {}
         self.ink_canvas.delete("all")
         self._queue_autosave()
 
     def on_ink_press(self, event):
         if self.is_loading_page:
             return
+        x = int(self.ink_canvas.canvasx(event.x))
+        y = int(self.ink_canvas.canvasy(event.y))
+        hit_image_id = self._image_id_at(x, y)
+        if hit_image_id:
+            self.dragging_image_id = hit_image_id
+            item_x, item_y = self.ink_canvas.coords(f"inkimg:{hit_image_id}")
+            self.dragging_offset = (x - int(item_x), y - int(item_y))
+            return
         if self.current_tool.get() == "eraser":
             self.current_stroke = None
-            self._erase_strokes_at(event.x, event.y)
+            self._erase_strokes_at(x, y)
             return
         width = int(self.pen_size_var.get())
-        self.current_stroke = {"tool": "pen", "color": self.pen_color, "width": width, "points": [[event.x, event.y]]}
+        self.current_stroke = {"tool": "pen", "color": self.pen_color, "width": width, "points": [[x, y]]}
 
     def on_ink_drag(self, event):
+        x = int(self.ink_canvas.canvasx(event.x))
+        y = int(self.ink_canvas.canvasy(event.y))
+        if self.dragging_image_id:
+            self._move_image(self.dragging_image_id, x - self.dragging_offset[0], y - self.dragging_offset[1])
+            return
         if self.current_tool.get() == "eraser":
-            self._erase_strokes_at(event.x, event.y)
+            self._erase_strokes_at(x, y)
             return
         if not self.current_stroke:
             return
         points = self.current_stroke["points"]
         last_x, last_y = points[-1]
-        points.append([event.x, event.y])
+        points.append([x, y])
         self.ink_canvas.create_line(
             last_x,
             last_y,
-            event.x,
-            event.y,
+            x,
+            y,
             fill=self.current_stroke["color"],
             width=self.current_stroke["width"],
             capstyle=tk.ROUND,
@@ -485,6 +581,10 @@ class WindowsNoteApp(tk.Tk):
         )
 
     def on_ink_release(self, event):
+        if self.dragging_image_id:
+            self.dragging_image_id = None
+            self._queue_autosave()
+            return
         if self.current_tool.get() == "eraser":
             self.current_stroke = None
             return
@@ -505,6 +605,22 @@ class WindowsNoteApp(tk.Tk):
         self.ink_strokes.append(self.current_stroke)
         self.current_stroke = None
         self._queue_autosave()
+
+    def _image_id_at(self, x: int, y: int):
+        hits = self.ink_canvas.find_overlapping(x, y, x, y)
+        for item in reversed(hits):
+            for tag in self.ink_canvas.gettags(item):
+                if tag.startswith("inkimg:"):
+                    return tag.split(":", 1)[1]
+        return None
+
+    def _move_image(self, image_id: str, x: int, y: int):
+        self.ink_canvas.coords(f"inkimg:{image_id}", x, y)
+        for img in self.ink_images:
+            if img.get("id") == image_id:
+                img["x"] = x
+                img["y"] = y
+                break
 
     def _erase_strokes_at(self, x: int, y: int):
         radius = max(8, int(self.pen_size_var.get()) * 2)
@@ -550,6 +666,57 @@ class WindowsNoteApp(tk.Tk):
         cy = y1 + t * dy
         return (px - cx) * (px - cx) + (py - cy) * (py - cy)
 
+    def _on_ink_mousewheel(self, event):
+        self.ink_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def insert_image_at_cursor(self):
+        if not (self.selected_notebook_id and self.selected_section_id and self.selected_page_id):
+            messagebox.showinfo("Info", "Select a page first.")
+            return
+        if not PIL_AVAILABLE:
+            messagebox.showwarning("Image Disabled", "Image insert requires Pillow.\nRun: python -m pip install pillow")
+            return
+        path = filedialog.askopenfilename(
+            title="Insert image",
+            filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        asset = self.storage.import_page_asset(
+            self.selected_notebook_id, self.selected_section_id, self.selected_page_id, Path(path)
+        )
+        px = self.ink_canvas.winfo_pointerx() - self.ink_canvas.winfo_rootx()
+        py = self.ink_canvas.winfo_pointery() - self.ink_canvas.winfo_rooty()
+        x = int(self.ink_canvas.canvasx(max(0, px)))
+        y = int(self.ink_canvas.canvasy(max(0, py)))
+        image_meta = {"id": uuid.uuid4().hex[:10], "asset": asset, "x": x, "y": y}
+        self.ink_images.append(image_meta)
+        self._draw_canvas_image(image_meta)
+        self._queue_autosave()
+
+    def _draw_canvas_image(self, image_meta: dict):
+        if not PIL_AVAILABLE:
+            return
+        image_id = image_meta.get("id")
+        asset = image_meta.get("asset")
+        if not image_id or not asset:
+            return
+        asset_path = self.storage.page_asset_path(
+            self.selected_notebook_id, self.selected_section_id, self.selected_page_id, asset
+        )
+        if not asset_path.exists():
+            return
+        with Image.open(asset_path) as opened:
+            pil_image = opened.convert("RGBA")
+        max_side = 1200
+        if pil_image.width > max_side or pil_image.height > max_side:
+            pil_image.thumbnail((max_side, max_side))
+        tk_image = ImageTk.PhotoImage(pil_image)
+        self.ink_image_cache[image_id] = tk_image
+        x = int(image_meta.get("x", 50))
+        y = int(image_meta.get("y", 50))
+        self.ink_canvas.create_image(x, y, image=tk_image, anchor=tk.NW, tags=("ink_image", f"inkimg:{image_id}"))
+
     def _draw_stroke(self, stroke: dict):
         points = stroke.get("points", [])
         color = stroke.get("color", DEFAULT_INK_COLOR)
@@ -569,19 +736,44 @@ class WindowsNoteApp(tk.Tk):
     def _load_ink_for_current_page(self):
         self.ink_canvas.delete("all")
         self.ink_strokes = []
+        self.ink_images = []
+        self.ink_image_cache = {}
         if not (self.selected_notebook_id and self.selected_section_id and self.selected_page_id):
             return
-        self.ink_strokes = self.storage.load_ink_strokes(
-            self.selected_notebook_id, self.selected_section_id, self.selected_page_id
-        )
+        payload = self.storage.load_ink_payload(self.selected_notebook_id, self.selected_section_id, self.selected_page_id)
+        self.ink_strokes = payload.get("strokes", [])
+        self.ink_images = payload.get("images", [])
         for stroke in self.ink_strokes:
             self._draw_stroke(stroke)
+        for image_meta in self.ink_images:
+            self._draw_canvas_image(image_meta)
 
     def _render_ink_image(self):
-        width = max(1, self.ink_canvas.winfo_width())
-        height = max(1, self.ink_canvas.winfo_height())
+        region = self.ink_canvas.cget("scrollregion")
+        if region:
+            x0, y0, x1, y1 = [int(float(v)) for v in region.split()]
+            width = max(1, x1 - x0)
+            height = max(1, y1 - y0)
+        else:
+            width = max(1, self.ink_canvas.winfo_width())
+            height = max(1, self.ink_canvas.winfo_height())
         image = Image.new("RGB", (width, height), "white")
         draw = ImageDraw.Draw(image)
+        for image_meta in self.ink_images:
+            asset = image_meta.get("asset")
+            if not asset:
+                continue
+            asset_path = self.storage.page_asset_path(
+                self.selected_notebook_id, self.selected_section_id, self.selected_page_id, asset
+            )
+            if not asset_path.exists():
+                continue
+            try:
+                with Image.open(asset_path) as opened:
+                    src = opened.convert("RGB")
+                    image.paste(src, (int(image_meta.get("x", 0)), int(image_meta.get("y", 0))))
+            except OSError:
+                continue
         for stroke in self.ink_strokes:
             points = [tuple(p) for p in stroke.get("points", [])]
             color = stroke.get("color", DEFAULT_INK_COLOR)
@@ -806,11 +998,12 @@ class WindowsNoteApp(tk.Tk):
             content,
             formatting,
         )
-        self.storage.save_ink_strokes(
+        self.storage.save_ink_payload(
             self.selected_notebook_id,
             self.selected_section_id,
             self.selected_page_id,
             self.ink_strokes,
+            self.ink_images,
         )
         if PIL_AVAILABLE:
             image = self._render_ink_image()
@@ -828,6 +1021,132 @@ class WindowsNoteApp(tk.Tk):
             )
         self.refresh_pages()
 
+    def save_as_page(self):
+        if not (self.selected_notebook_id and self.selected_section_id and self.selected_page_id):
+            messagebox.showinfo("Info", "Select a page first.")
+            return
+        self.save_current_page()
+        target = filedialog.asksaveasfilename(
+            title="Save Page As",
+            defaultextension=".wnote.json",
+            filetypes=[("WindowsNote Page", "*.wnote.json"), ("JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not target:
+            return
+
+        image_items = []
+        for meta in self.ink_images:
+            asset_name = meta.get("asset")
+            if not asset_name:
+                continue
+            asset_path = self.storage.page_asset_path(
+                self.selected_notebook_id, self.selected_section_id, self.selected_page_id, asset_name
+            )
+            if not asset_path.exists():
+                continue
+            encoded = base64.b64encode(asset_path.read_bytes()).decode("ascii")
+            image_items.append(
+                {
+                    "id": meta.get("id"),
+                    "x": int(meta.get("x", 0)),
+                    "y": int(meta.get("y", 0)),
+                    "asset_name": asset_name,
+                    "mime": self._guess_mime(asset_path.suffix.lower()),
+                    "data_base64": encoded,
+                }
+            )
+
+        payload = {
+            "app_version": APP_VERSION,
+            "exported_at": utc_now_iso(),
+            "page": {
+                "id": self.selected_page_id,
+                "title": sanitize_title(self.page_title_var.get()),
+                "content": self.editor.get("1.0", "end-1c"),
+                "formatting": self._collect_formatting_ranges(),
+            },
+            "ink": {"strokes": self.ink_strokes, "images": image_items},
+        }
+        with Path(target).open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    def print_to_pdf(self):
+        if not REPORTLAB_AVAILABLE:
+            messagebox.showwarning("PDF Disabled", "PDF print requires reportlab.\nRun: python -m pip install reportlab")
+            return
+        if not (self.selected_notebook_id and self.selected_section_id and self.selected_page_id):
+            messagebox.showinfo("Info", "Select a page first.")
+            return
+
+        paper = simpledialog.askstring("Paper Size", "Choose paper size: A4, LETTER, LEGAL, A5", parent=self)
+        if not paper:
+            return
+        paper = paper.strip().upper()
+        size_map = {"A4": A4, "LETTER": LETTER, "LEGAL": LEGAL, "A5": A5}
+        if paper not in size_map:
+            messagebox.showerror("Invalid Size", "Supported sizes: A4, LETTER, LEGAL, A5")
+            return
+
+        target = filedialog.asksaveasfilename(
+            title="Print to PDF",
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+        )
+        if not target:
+            return
+
+        self.save_current_page()
+        page_size = size_map[paper]
+        page_w, page_h = page_size
+        margin = 36
+        c = pdf_canvas.Canvas(target, pagesize=page_size)
+
+        y = page_h - margin
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(margin, y, sanitize_title(self.page_title_var.get()))
+        y -= 24
+
+        c.setFont("Helvetica", 10)
+        usable_w = page_w - (margin * 2)
+        wrap_chars = max(40, int(usable_w / 5.2))
+        for raw_line in self.editor.get("1.0", "end-1c").splitlines() or [""]:
+            lines = textwrap.wrap(raw_line, width=wrap_chars) or [""]
+            for line in lines:
+                if y < margin + 120:
+                    c.showPage()
+                    y = page_h - margin
+                    c.setFont("Helvetica", 10)
+                c.drawString(margin, y, line)
+                y -= 14
+
+        if PIL_AVAILABLE:
+            ink_img = self._render_ink_image()
+            tmp_png = self.storage.ink_png_path(self.selected_notebook_id, self.selected_section_id, self.selected_page_id)
+            ink_img.save(tmp_png, format="PNG")
+            if tmp_png.exists():
+                img_reader = ImageReader(str(tmp_png))
+                iw, ih = ink_img.size
+                scale = min(usable_w / max(1, iw), (page_h - (margin * 2)) / max(1, ih), 1.0)
+                draw_w = iw * scale
+                draw_h = ih * scale
+                if y < draw_h + margin:
+                    c.showPage()
+                    y = page_h - margin
+                c.drawImage(img_reader, margin, max(margin, y - draw_h), width=draw_w, height=draw_h, preserveAspectRatio=True)
+
+        c.save()
+
+    @staticmethod
+    def _guess_mime(ext: str) -> str:
+        return {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".bmp": "image/bmp",
+            ".webp": "image/webp",
+        }.get(ext, "application/octet-stream")
+
     def _collect_formatting_ranges(self) -> list[dict]:
         spans = []
         for tag in TEXT_TAGS:
@@ -841,6 +1160,9 @@ class WindowsNoteApp(tk.Tk):
         self.editor.delete("1.0", tk.END)
         self.ink_canvas.delete("all")
         self.ink_strokes = []
+        self.ink_images = []
+        self.ink_image_cache = {}
+        self.dragging_image_id = None
 
     def change_storage_folder(self):
         selected = filedialog.askdirectory(initialdir=str(self.storage_root), title="Choose note storage folder")

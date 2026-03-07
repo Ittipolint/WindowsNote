@@ -12,8 +12,14 @@ The app stores all notes on your local machine folder (configurable) using JSON 
 
 - Notebook > Section > Page structure
 - Rich text formatting (bold, italic, underline, highlight)
+- Adjustable pane widths (Notebooks / Pages / Editor)
+- Text + Ink in one page view (no tab switching)
+- Text and Ink areas support both vertical and horizontal scrollbars
 - Ink canvas for stylus/mouse drawing
 - Pen color, stroke size, and stroke eraser tools (Surface Pen supported)
+- Insert image into page and drag to move position
+- Print page to PDF (A4, LETTER, LEGAL, A5)
+- Save As (export `.wnote.json`)
 - Quick page search
 - Autosave and manual save (`Ctrl+S`)
 - Rename and delete notebook/section/page
