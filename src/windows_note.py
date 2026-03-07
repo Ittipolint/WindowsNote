@@ -409,6 +409,7 @@ class WindowsNoteApp(tk.Tk):
         self.tree = ttk.Treeview(notebook_frame, show="tree")
         self.tree.pack(fill=tk.BOTH, expand=True)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+        self.tree.bind("<ButtonRelease-1>", self.on_tree_select)
 
         nb_btns = ttk.Frame(notebook_frame)
         nb_btns.pack(fill=tk.X, pady=4)
@@ -892,22 +893,32 @@ class WindowsNoteApp(tk.Tk):
             self.tree.item(nb_node, open=True)
 
     def on_tree_select(self, _event=None):
-        selected = self.tree.selection()
-        if not selected:
-            return
-        token = selected[0]
-        parts = token.split(":")
-
-        if parts[0] == "nb":
-            self.selected_notebook_id = parts[1]
-            self.selected_section_id = None
-        elif parts[0] == "sec":
-            self.selected_notebook_id = parts[1]
-            self.selected_section_id = parts[2]
-
+        self._sync_selection_context()
         self.refresh_pages()
 
+    def _sync_selection_context(self):
+        notebook_id = self.selected_notebook_id
+        section_id = self.selected_section_id
+        candidates = list(self.tree.selection())
+        focus = self.tree.focus()
+        if focus:
+            candidates.append(focus)
+        for token in candidates:
+            parts = token.split(":")
+            if not parts:
+                continue
+            if parts[0] == "sec" and len(parts) == 3:
+                notebook_id = parts[1]
+                section_id = parts[2]
+                break
+            if parts[0] == "nb" and len(parts) == 2:
+                notebook_id = parts[1]
+                section_id = None
+        self.selected_notebook_id = notebook_id
+        self.selected_section_id = section_id
+
     def refresh_pages(self):
+        self._sync_selection_context()
         self.pages_list.delete(0, tk.END)
         self.page_cache = []
         if not (self.selected_notebook_id and self.selected_section_id):
@@ -928,6 +939,7 @@ class WindowsNoteApp(tk.Tk):
         self.refresh_notebooks()
 
     def add_section(self):
+        self._sync_selection_context()
         if not self.selected_notebook_id:
             messagebox.showinfo("Info", "Select a notebook first.")
             return
@@ -938,6 +950,7 @@ class WindowsNoteApp(tk.Tk):
         self.refresh_notebooks()
 
     def add_page(self):
+        self._sync_selection_context()
         if not (self.selected_notebook_id and self.selected_section_id):
             messagebox.showinfo("Info", "Select a section first.")
             return
@@ -1032,6 +1045,7 @@ class WindowsNoteApp(tk.Tk):
         self.refresh_pages()
 
     def delete_page(self):
+        self._sync_selection_context()
         if not (self.selected_notebook_id and self.selected_section_id):
             return
         page = None
@@ -1058,6 +1072,7 @@ class WindowsNoteApp(tk.Tk):
         self.delete_page()
 
     def delete_current_section(self):
+        self._sync_selection_context()
         section_id = self.selected_section_id
         notebook_id = self.selected_notebook_id
         if not (notebook_id and section_id):
