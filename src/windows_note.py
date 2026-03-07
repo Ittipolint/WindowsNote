@@ -954,12 +954,25 @@ class WindowsNoteApp(tk.Tk):
         if not (self.selected_notebook_id and self.selected_section_id):
             messagebox.showinfo("Info", "Select a section first.")
             return
+        if self.autosave_job:
+            self.after_cancel(self.autosave_job)
+            self.autosave_job = None
+        if self.selected_page_id:
+            self.save_current_page()
         title = simpledialog.askstring("New Page", "Page title:", parent=self)
         if not title:
             return
         page_id = self.storage.create_page(self.selected_notebook_id, self.selected_section_id, title)
         self.refresh_pages()
         self.selected_page_id = page_id
+        # Keep UI state aligned with the newly created page to avoid stale autosave overwriting its title.
+        self.load_current_page()
+        for idx, page in enumerate(self.page_cache):
+            if page["id"] == page_id:
+                self.pages_list.selection_clear(0, tk.END)
+                self.pages_list.selection_set(idx)
+                self.pages_list.activate(idx)
+                break
 
     def rename_tree_item(self):
         sel = self.tree.selection()
