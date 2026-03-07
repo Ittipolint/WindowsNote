@@ -35,6 +35,8 @@ DEFAULT_DATA_ROOT = "./local_notes"
 TEXT_TAGS = ("bold", "italic", "underline", "highlight")
 DEFAULT_INK_COLOR = "#111827"
 APP_VERSION = "1.2.0"
+PAGE_CANVAS_WIDTH = 8000
+PAGE_CANVAS_HEIGHT = 12000
 
 
 def utc_now_iso() -> str:
@@ -442,7 +444,11 @@ class WindowsNoteApp(tk.Tk):
         self.page_canvas = tk.Canvas(page_frame, bg="#f7f7f7", cursor="pencil")
         page_y = ttk.Scrollbar(page_frame, orient=tk.VERTICAL, command=self.page_canvas.yview)
         page_x = ttk.Scrollbar(page_frame, orient=tk.HORIZONTAL, command=self.page_canvas.xview)
-        self.page_canvas.configure(yscrollcommand=page_y.set, xscrollcommand=page_x.set, scrollregion=(0, 0, 4200, 6200))
+        self.page_canvas.configure(
+            yscrollcommand=page_y.set,
+            xscrollcommand=page_x.set,
+            scrollregion=(0, 0, PAGE_CANVAS_WIDTH, PAGE_CANVAS_HEIGHT),
+        )
         self.page_canvas.grid(row=1, column=0, sticky="nsew")
         page_y.grid(row=1, column=1, sticky="ns")
         page_x.grid(row=2, column=0, sticky="ew")
@@ -450,7 +456,9 @@ class WindowsNoteApp(tk.Tk):
         page_frame.columnconfigure(0, weight=1)
 
         self.ink_start_y = 20
-        self.page_canvas.create_rectangle(10, 10, 4010, 6100, fill="white", outline="#d1d5db", tags=("inkbg",))
+        self.page_canvas.create_rectangle(
+            10, 10, PAGE_CANVAS_WIDTH - 190, PAGE_CANVAS_HEIGHT - 200, fill="white", outline="#d1d5db", tags=("inkbg",)
+        )
         self.page_canvas.create_text(20, 14, anchor=tk.W, text="Ink Area (draw here)", fill="#4b5563")
         self.editor = None
 
@@ -1026,10 +1034,18 @@ class WindowsNoteApp(tk.Tk):
     def delete_page(self):
         if not (self.selected_notebook_id and self.selected_section_id):
             return
+        page = None
         sel = self.pages_list.curselection()
-        if not sel:
+        if sel:
+            page = self.page_cache[sel[0]]
+        elif self.selected_page_id:
+            for item in self.page_cache:
+                if item["id"] == self.selected_page_id:
+                    page = item
+                    break
+        if not page:
+            messagebox.showinfo("Info", "Select a page first.")
             return
-        page = self.page_cache[sel[0]]
         if not messagebox.askyesno("Confirm Delete", f"Delete page '{page['title']}'?"):
             return
         self.storage.delete_page(self.selected_notebook_id, self.selected_section_id, page["id"])
@@ -1042,18 +1058,27 @@ class WindowsNoteApp(tk.Tk):
         self.delete_page()
 
     def delete_current_section(self):
-        if not (self.selected_notebook_id and self.selected_section_id):
+        section_id = self.selected_section_id
+        notebook_id = self.selected_notebook_id
+        if not (notebook_id and section_id):
+            tree_sel = self.tree.selection()
+            if tree_sel:
+                token = tree_sel[0].split(":")
+                if token[0] == "sec" and len(token) == 3:
+                    notebook_id = token[1]
+                    section_id = token[2]
+        if not (notebook_id and section_id):
             messagebox.showinfo("Info", "Select a section first.")
             return
         section_title = ""
-        for sec in self.storage.list_sections(self.selected_notebook_id):
-            if sec["id"] == self.selected_section_id:
+        for sec in self.storage.list_sections(notebook_id):
+            if sec["id"] == section_id:
                 section_title = sec["title"]
                 break
-        label = section_title or self.selected_section_id
+        label = section_title or section_id
         if not messagebox.askyesno("Confirm Delete", f"Delete section '{label}' and all pages?"):
             return
-        self.storage.delete_section(self.selected_notebook_id, self.selected_section_id)
+        self.storage.delete_section(notebook_id, section_id)
         self.selected_section_id = None
         self.selected_page_id = None
         self._clear_editor()

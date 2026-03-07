@@ -14,7 +14,7 @@ The app stores all notes on your local machine folder (configurable) using JSON 
 - Ink-focused note canvas (no text editor area)
 - Adjustable pane widths (Notebooks / Pages / Editor)
 - Ink + images in one continuous page canvas (single view)
-- One shared vertical/horizontal scrollbar for continuous page navigation
+- One shared vertical/horizontal scrollbar for continuous page navigation (up/down + left/right)
 - Ink canvas for stylus/mouse drawing
 - Pen color, stroke size, and stroke eraser tools (Surface Pen supported)
 - Insert image into page, select/move/delete image position
