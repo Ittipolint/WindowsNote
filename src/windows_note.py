@@ -185,7 +185,7 @@ class LocalNoteStorage:
     @staticmethod
     def _read_json(path: Path, fallback):
         try:
-            with path.open("r", encoding="utf-8") as f:
+            with path.open("r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError, FileNotFoundError):
             return fallback
@@ -225,7 +225,7 @@ class WindowsNoteApp(tk.Tk):
             self._save_config(data)
             return data
         try:
-            with CONFIG_FILE.open("r", encoding="utf-8") as f:
+            with CONFIG_FILE.open("r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             data = {"data_root": DEFAULT_DATA_ROOT}

@@ -23,6 +23,34 @@ The app stores all notes on your local machine folder (configurable) using JSON 
 python src\windows_note.py
 ```
 
+## Build Windows Installer Package
+
+Build executable + installer assets:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\build_release.ps1
+```
+
+Output files:
+
+- `release\WindowsNote-payload.zip`
+- `release\Install-WindowsNote.ps1`
+
+Install on Windows:
+
+```powershell
+cd .\release
+powershell -ExecutionPolicy Bypass -File .\Install-WindowsNote.ps1
+```
+
+Default installation path:
+
+- `%LOCALAPPDATA%\WindowsNote\WindowsNote.exe`
+
+Default data folder:
+
+- `%USERPROFILE%\Documents\WindowsNoteData`
+
 ## Storage Layout
 
 Configured folder (default: `./local_notes`) contains:

@@ -3,3 +3,8 @@ __pycache__/
 local_notes/
 .vscode/
 .idea/
+build/
+dist/
+release/
+*.spec
+_test_install/
