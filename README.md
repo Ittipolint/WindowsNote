@@ -51,6 +51,20 @@ Default data folder:
 
 - `%USERPROFILE%\Documents\WindowsNoteData`
 
+## Build One-Click Setup.exe (Wizard Installer)
+
+Create a single `Setup.exe` file:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\build_setup_exe.ps1
+```
+
+The script auto-downloads portable NSIS on first run.
+
+Output:
+
+- `release\WindowsNote-Setup.exe`
+
 ## Storage Layout
 
 Configured folder (default: `./local_notes`) contains:

@@ -8,3 +8,4 @@ dist/
 release/
 *.spec
 _test_install/
+tools/vendor/
