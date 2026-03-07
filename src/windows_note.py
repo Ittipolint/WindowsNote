@@ -497,6 +497,10 @@ class WindowsNoteApp(tk.Tk):
         menubar.add_cascade(label="Create", menu=create_menu)
 
         edit_menu = tk.Menu(menubar, tearoff=0)
+        edit_menu.add_command(label="Rename Notebook", command=self.rename_current_notebook)
+        edit_menu.add_command(label="Rename Section", command=self.rename_current_section)
+        edit_menu.add_command(label="Rename Page", command=self.rename_current_page)
+        edit_menu.add_separator()
         edit_menu.add_command(label="Delete Section", command=self.delete_current_section)
         edit_menu.add_command(label="Delete Page", command=self.delete_current_page)
         edit_menu.add_command(label="Delete Selected Image", command=self.delete_selected_image)
@@ -1030,6 +1034,84 @@ class WindowsNoteApp(tk.Tk):
             self.storage.rename_section(parts[1], parts[2], new_title)
         self.refresh_notebooks()
 
+    def _current_notebook_context(self):
+        self._sync_selection_context()
+        notebook_id = self.selected_notebook_id
+        title = None
+        for nb in self.storage.list_notebooks():
+            if nb["id"] == notebook_id:
+                title = nb["title"]
+                break
+        return notebook_id, title
+
+    def _current_section_context(self):
+        self._sync_selection_context()
+        notebook_id = self.selected_notebook_id
+        section_id = self.selected_section_id
+        title = None
+        if notebook_id and section_id:
+            for sec in self.storage.list_sections(notebook_id):
+                if sec["id"] == section_id:
+                    title = sec["title"]
+                    break
+        return notebook_id, section_id, title
+
+    def _current_page_context(self):
+        self._sync_selection_context()
+        notebook_id = self.selected_notebook_id
+        section_id = self.selected_section_id
+        page_id = self.selected_page_id
+        title = None
+        if notebook_id and section_id:
+            sel = self.pages_list.curselection()
+            if sel and sel[0] < len(self.page_cache):
+                page = self.page_cache[sel[0]]
+                page_id = page["id"]
+                title = page["title"]
+            elif page_id:
+                for page in self.page_cache:
+                    if page["id"] == page_id:
+                        title = page["title"]
+                        break
+        return notebook_id, section_id, page_id, title
+
+    def rename_current_notebook(self):
+        notebook_id, current_title = self._current_notebook_context()
+        if not notebook_id:
+            messagebox.showinfo("Info", "Select a notebook first.")
+            return
+        initial = current_title or "Untitled Notebook"
+        new_title = simpledialog.askstring("Rename Notebook", "New title:", initialvalue=initial, parent=self)
+        if not new_title:
+            return
+        self.storage.rename_notebook(notebook_id, new_title)
+        self.refresh_notebooks()
+
+    def rename_current_section(self):
+        notebook_id, section_id, current_title = self._current_section_context()
+        if not (notebook_id and section_id):
+            messagebox.showinfo("Info", "Select a section first.")
+            return
+        initial = current_title or "Untitled Section"
+        new_title = simpledialog.askstring("Rename Section", "New title:", initialvalue=initial, parent=self)
+        if not new_title:
+            return
+        self.storage.rename_section(notebook_id, section_id, new_title)
+        self.refresh_notebooks()
+
+    def rename_current_page(self):
+        notebook_id, section_id, page_id, current_title = self._current_page_context()
+        if not (notebook_id and section_id and page_id):
+            messagebox.showinfo("Info", "Select a page first.")
+            return
+        initial = current_title or "Untitled Page"
+        new_title = simpledialog.askstring("Rename Page", "New title:", initialvalue=initial, parent=self)
+        if not new_title:
+            return
+        self.storage.rename_page(notebook_id, section_id, page_id, new_title)
+        self.refresh_pages()
+        self._select_page_in_list(page_id)
+
     def delete_tree_item(self):
         sel = self.tree.selection()
         if not sel:
@@ -1094,17 +1176,7 @@ class WindowsNoteApp(tk.Tk):
             self._hide_loading()
 
     def rename_page(self):
-        if not (self.selected_notebook_id and self.selected_section_id):
-            return
-        sel = self.pages_list.curselection()
-        if not sel:
-            return
-        page = self.page_cache[sel[0]]
-        new_title = simpledialog.askstring("Rename Page", "New title:", initialvalue=page["title"], parent=self)
-        if not new_title:
-            return
-        self.storage.rename_page(self.selected_notebook_id, self.selected_section_id, page["id"], new_title)
-        self.refresh_pages()
+        self.rename_current_page()
 
     def delete_page(self):
         self._sync_selection_context()
