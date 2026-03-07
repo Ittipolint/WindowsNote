@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$Sign,
+    [switch]$SignStrict
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -8,9 +11,14 @@ $vendorRoot = Join-Path $repoRoot 'tools\vendor'
 $nsisZip = Join-Path $vendorRoot 'nsis.zip'
 $nsisRoot = Join-Path $vendorRoot 'nsis'
 $makensis = Join-Path $nsisRoot 'nsis-3.11\makensis.exe'
+$signingScript = Join-Path $repoRoot 'tools\signing.ps1'
+
+if ($Sign) {
+    . $signingScript
+}
 
 # Build app exe first
-& (Join-Path $repoRoot 'tools\build_release.ps1')
+& (Join-Path $repoRoot 'tools\build_release.ps1') -Sign:$Sign -SignStrict:$SignStrict
 
 if (-not (Test-Path $makensis)) {
     New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
@@ -40,6 +48,10 @@ finally {
 $setupPath = Join-Path $repoRoot 'release\WindowsNote-Setup.exe'
 if (-not (Test-Path $setupPath)) {
     throw 'Setup EXE was not generated.'
+}
+
+if ($Sign) {
+    Invoke-CodeSigning -FilePath $setupPath -Strict:$SignStrict | Out-Null
 }
 
 Write-Host "Setup generated: $setupPath"
