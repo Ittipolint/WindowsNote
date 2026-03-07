@@ -13,8 +13,8 @@ The app stores all notes on your local machine folder (configurable) using JSON 
 - Notebook > Section > Page structure
 - Rich text formatting (bold, italic, underline, highlight)
 - Adjustable pane widths (Notebooks / Pages / Editor)
-- Text + Ink in one page view (no tab switching)
-- Text and Ink areas support both vertical and horizontal scrollbars
+- Text + Ink + images in one continuous page canvas (single view, no tab switching)
+- One shared vertical/horizontal scrollbar for continuous page navigation
 - Ink canvas for stylus/mouse drawing
 - Pen color, stroke size, and stroke eraser tools (Surface Pen supported)
 - Insert image into page and drag to move position

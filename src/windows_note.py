@@ -436,38 +436,37 @@ class WindowsNoteApp(tk.Tk):
         self.page_title_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
         self.page_title_entry.bind("<KeyRelease>", self._on_page_text_change)
 
-        content_paned = ttk.Panedwindow(right, orient=tk.VERTICAL)
-        content_paned.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        page_frame = ttk.Frame(right)
+        page_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        ttk.Label(page_frame, text="Page (Text + Ink + Images)").grid(row=0, column=0, sticky="w")
 
-        text_frame = ttk.Frame(content_paned)
-        ink_frame = ttk.Frame(content_paned)
-        content_paned.add(text_frame, weight=3)
-        content_paned.add(ink_frame, weight=2)
+        self.page_canvas = tk.Canvas(page_frame, bg="#f7f7f7", cursor="pencil")
+        page_y = ttk.Scrollbar(page_frame, orient=tk.VERTICAL, command=self.page_canvas.yview)
+        page_x = ttk.Scrollbar(page_frame, orient=tk.HORIZONTAL, command=self.page_canvas.xview)
+        self.page_canvas.configure(yscrollcommand=page_y.set, xscrollcommand=page_x.set, scrollregion=(0, 0, 4200, 6200))
+        self.page_canvas.grid(row=1, column=0, sticky="nsew")
+        page_y.grid(row=1, column=1, sticky="ns")
+        page_x.grid(row=2, column=0, sticky="ew")
+        page_frame.rowconfigure(1, weight=1)
+        page_frame.columnconfigure(0, weight=1)
 
-        self.editor = tk.Text(text_frame, wrap=tk.NONE, undo=True)
-        text_y = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.editor.yview)
-        text_x = ttk.Scrollbar(text_frame, orient=tk.HORIZONTAL, command=self.editor.xview)
-        self.editor.configure(yscrollcommand=text_y.set, xscrollcommand=text_x.set)
-        self.editor.grid(row=0, column=0, sticky="nsew")
-        text_y.grid(row=0, column=1, sticky="ns")
-        text_x.grid(row=1, column=0, sticky="ew")
-        text_frame.rowconfigure(0, weight=1)
-        text_frame.columnconfigure(0, weight=1)
+        self.text_area_height = 1400
+        self.ink_start_y = self.text_area_height + 40
+        self.page_canvas.create_rectangle(10, 10, 4010, self.text_area_height, fill="white", outline="#d1d5db", tags=("pagebg",))
+        self.page_canvas.create_rectangle(
+            10, self.ink_start_y, 4010, 6100, fill="white", outline="#d1d5db", tags=("inkbg",)
+        )
+
+        self.editor = tk.Text(self.page_canvas, wrap=tk.NONE, undo=True)
+        self.editor_window_id = self.page_canvas.create_window(20, 20, anchor=tk.NW, width=3980, height=1360, window=self.editor)
         self.editor.bind("<<Modified>>", self._on_text_modified)
 
-        ttk.Label(ink_frame, text="Ink + Image Layer").grid(row=0, column=0, sticky="w")
-        self.ink_canvas = tk.Canvas(ink_frame, bg="white", cursor="pencil")
-        ink_y = ttk.Scrollbar(ink_frame, orient=tk.VERTICAL, command=self.ink_canvas.yview)
-        ink_x = ttk.Scrollbar(ink_frame, orient=tk.HORIZONTAL, command=self.ink_canvas.xview)
-        self.ink_canvas.configure(yscrollcommand=ink_y.set, xscrollcommand=ink_x.set, scrollregion=(0, 0, 4000, 4000))
-        self.ink_canvas.grid(row=1, column=0, sticky="nsew")
-        ink_y.grid(row=1, column=1, sticky="ns")
-        ink_x.grid(row=2, column=0, sticky="ew")
-        ink_frame.rowconfigure(1, weight=1)
-        ink_frame.columnconfigure(0, weight=1)
+        self.ink_canvas = self.page_canvas
+        self.canvas_cursor = (80, self.ink_start_y + 80)
         self.ink_canvas.bind("<ButtonPress-1>", self.on_ink_press)
         self.ink_canvas.bind("<B1-Motion>", self.on_ink_drag)
         self.ink_canvas.bind("<ButtonRelease-1>", self.on_ink_release)
+        self.ink_canvas.bind("<Motion>", self._on_canvas_motion)
         self.ink_canvas.bind("<MouseWheel>", self._on_ink_mousewheel)
 
         self._setup_text_tags()
@@ -534,7 +533,8 @@ class WindowsNoteApp(tk.Tk):
         self.ink_strokes = []
         self.ink_images = []
         self.ink_image_cache = {}
-        self.ink_canvas.delete("all")
+        self.ink_canvas.delete("inkstroke")
+        self.ink_canvas.delete("ink_image")
         self._queue_autosave()
 
     def on_ink_press(self, event):
@@ -542,11 +542,14 @@ class WindowsNoteApp(tk.Tk):
             return
         x = int(self.ink_canvas.canvasx(event.x))
         y = int(self.ink_canvas.canvasy(event.y))
+        self.canvas_cursor = (x, y)
         hit_image_id = self._image_id_at(x, y)
         if hit_image_id:
             self.dragging_image_id = hit_image_id
             item_x, item_y = self.ink_canvas.coords(f"inkimg:{hit_image_id}")
             self.dragging_offset = (x - int(item_x), y - int(item_y))
+            return
+        if y < self.ink_start_y:
             return
         if self.current_tool.get() == "eraser":
             self.current_stroke = None
@@ -558,8 +561,11 @@ class WindowsNoteApp(tk.Tk):
     def on_ink_drag(self, event):
         x = int(self.ink_canvas.canvasx(event.x))
         y = int(self.ink_canvas.canvasy(event.y))
+        self.canvas_cursor = (x, y)
         if self.dragging_image_id:
             self._move_image(self.dragging_image_id, x - self.dragging_offset[0], y - self.dragging_offset[1])
+            return
+        if y < self.ink_start_y:
             return
         if self.current_tool.get() == "eraser":
             self._erase_strokes_at(x, y)
@@ -578,9 +584,13 @@ class WindowsNoteApp(tk.Tk):
             width=self.current_stroke["width"],
             capstyle=tk.ROUND,
             smooth=True,
+            tags=("inkstroke",),
         )
 
     def on_ink_release(self, event):
+        x = int(self.ink_canvas.canvasx(event.x))
+        y = int(self.ink_canvas.canvasy(event.y))
+        self.canvas_cursor = (x, y)
         if self.dragging_image_id:
             self.dragging_image_id = None
             self._queue_autosave()
@@ -601,6 +611,7 @@ class WindowsNoteApp(tk.Tk):
                 y + half,
                 outline=self.current_stroke["color"],
                 fill=self.current_stroke["color"],
+                tags=("inkstroke",),
             )
         self.ink_strokes.append(self.current_stroke)
         self.current_stroke = None
@@ -616,6 +627,7 @@ class WindowsNoteApp(tk.Tk):
 
     def _move_image(self, image_id: str, x: int, y: int):
         self.ink_canvas.coords(f"inkimg:{image_id}", x, y)
+        self._raise_ink_layers()
         for img in self.ink_images:
             if img.get("id") == image_id:
                 img["x"] = x
@@ -649,7 +661,7 @@ class WindowsNoteApp(tk.Tk):
 
         if len(kept) != original_count:
             self.ink_strokes = kept
-            self.ink_canvas.delete("all")
+            self.ink_canvas.delete("inkstroke")
             for stroke in self.ink_strokes:
                 self._draw_stroke(stroke)
             self._queue_autosave()
@@ -669,6 +681,21 @@ class WindowsNoteApp(tk.Tk):
     def _on_ink_mousewheel(self, event):
         self.ink_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
+    def _on_canvas_motion(self, event):
+        self.canvas_cursor = (int(self.ink_canvas.canvasx(event.x)), int(self.ink_canvas.canvasy(event.y)))
+
+    def _cursor_canvas_position(self):
+        if self.focus_get() == self.editor:
+            try:
+                box = self.editor.bbox("insert")
+            except tk.TclError:
+                box = None
+            if box:
+                ex, ey, _w, h = box
+                wx, wy = self.ink_canvas.coords(self.editor_window_id)
+                return int(wx + ex), int(wy + ey + h)
+        return self.canvas_cursor
+
     def insert_image_at_cursor(self):
         if not (self.selected_notebook_id and self.selected_section_id and self.selected_page_id):
             messagebox.showinfo("Info", "Select a page first.")
@@ -685,10 +712,9 @@ class WindowsNoteApp(tk.Tk):
         asset = self.storage.import_page_asset(
             self.selected_notebook_id, self.selected_section_id, self.selected_page_id, Path(path)
         )
-        px = self.ink_canvas.winfo_pointerx() - self.ink_canvas.winfo_rootx()
-        py = self.ink_canvas.winfo_pointery() - self.ink_canvas.winfo_rooty()
-        x = int(self.ink_canvas.canvasx(max(0, px)))
-        y = int(self.ink_canvas.canvasy(max(0, py)))
+        x, y = self._cursor_canvas_position()
+        if y < self.ink_start_y:
+            y = self.ink_start_y + 20
         image_meta = {"id": uuid.uuid4().hex[:10], "asset": asset, "x": x, "y": y}
         self.ink_images.append(image_meta)
         self._draw_canvas_image(image_meta)
@@ -716,6 +742,7 @@ class WindowsNoteApp(tk.Tk):
         x = int(image_meta.get("x", 50))
         y = int(image_meta.get("y", 50))
         self.ink_canvas.create_image(x, y, image=tk_image, anchor=tk.NW, tags=("ink_image", f"inkimg:{image_id}"))
+        self._raise_ink_layers()
 
     def _draw_stroke(self, stroke: dict):
         points = stroke.get("points", [])
@@ -724,17 +751,28 @@ class WindowsNoteApp(tk.Tk):
         if len(points) == 1:
             x, y = points[0]
             half = max(1, width // 2)
-            self.ink_canvas.create_oval(x - half, y - half, x + half, y + half, outline=color, fill=color)
+            self.ink_canvas.create_oval(
+                x - half, y - half, x + half, y + half, outline=color, fill=color, tags=("inkstroke",)
+            )
+            self._raise_ink_layers()
             return
         if len(points) < 2:
             return
         flattened = []
         for x, y in points:
             flattened.extend((x, y))
-        self.ink_canvas.create_line(*flattened, fill=color, width=width, capstyle=tk.ROUND, smooth=True)
+        self.ink_canvas.create_line(
+            *flattened, fill=color, width=width, capstyle=tk.ROUND, smooth=True, tags=("inkstroke",)
+        )
+        self._raise_ink_layers()
+
+    def _raise_ink_layers(self):
+        self.ink_canvas.tag_raise("inkstroke")
+        self.ink_canvas.tag_raise("ink_image")
 
     def _load_ink_for_current_page(self):
-        self.ink_canvas.delete("all")
+        self.ink_canvas.delete("inkstroke")
+        self.ink_canvas.delete("ink_image")
         self.ink_strokes = []
         self.ink_images = []
         self.ink_image_cache = {}
@@ -1158,7 +1196,8 @@ class WindowsNoteApp(tk.Tk):
     def _clear_editor(self):
         self.page_title_var.set("")
         self.editor.delete("1.0", tk.END)
-        self.ink_canvas.delete("all")
+        self.ink_canvas.delete("inkstroke")
+        self.ink_canvas.delete("ink_image")
         self.ink_strokes = []
         self.ink_images = []
         self.ink_image_cache = {}
