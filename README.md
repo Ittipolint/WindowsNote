@@ -12,6 +12,8 @@ The app stores all notes on your local machine folder (configurable) using JSON 
 
 - Notebook > Section > Page structure
 - Rich text formatting (bold, italic, underline, highlight)
+- Ink canvas for stylus/mouse drawing
+- Pen color, stroke size, and eraser tools
 - Quick page search
 - Autosave and manual save (`Ctrl+S`)
 - Rename and delete notebook/section/page
@@ -20,6 +22,7 @@ The app stores all notes on your local machine folder (configurable) using JSON 
 ## Run
 
 ```powershell
+python -m pip install -r requirements.txt
 python src\windows_note.py
 ```
 
@@ -72,6 +75,8 @@ Configured folder (default: `./local_notes`) contains:
 - `notebooks/<notebook-id>/meta.json`
 - `notebooks/<notebook-id>/sections/<section-id>/meta.json`
 - `notebooks/<notebook-id>/sections/<section-id>/pages/<page-id>.json`
+- `notebooks/<notebook-id>/sections/<section-id>/pages/<page-id>_ink.json`
+- `notebooks/<notebook-id>/sections/<section-id>/pages/<page-id>_ink.png`
 
 ## Config
 

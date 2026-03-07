@@ -5,13 +5,22 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import tkinter.font as tkfont
+try:
+    from PIL import Image, ImageDraw
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    Image = Any
+    ImageDraw = Any
 
 CONFIG_FILE = Path(__file__).resolve().parent.parent / "config.json"
 DEFAULT_DATA_ROOT = "./local_notes"
 TEXT_TAGS = ("bold", "italic", "underline", "highlight")
+DEFAULT_INK_COLOR = "#111827"
 
 
 def utc_now_iso() -> str:
@@ -113,6 +122,8 @@ class LocalNoteStorage:
         if not pages_dir.exists():
             return pages
         for page_file in sorted(pages_dir.glob("*.json")):
+            if page_file.stem.endswith("_ink"):
+                continue
             doc = self._read_json(page_file, {})
             pages.append(
                 {
@@ -152,6 +163,12 @@ class LocalNoteStorage:
         path = self._page_path(notebook_id, section_id, page_id)
         if path.exists():
             path.unlink()
+        ink_json = self._ink_json_path(notebook_id, section_id, page_id)
+        ink_png = self._ink_png_path(notebook_id, section_id, page_id)
+        if ink_json.exists():
+            ink_json.unlink()
+        if ink_png.exists():
+            ink_png.unlink()
 
     def load_page(self, notebook_id: str, section_id: str, page_id: str) -> Page:
         path = self._page_path(notebook_id, section_id, page_id)
@@ -179,8 +196,30 @@ class LocalNoteStorage:
         }
         self._write_json(path, data)
 
+    def load_ink_strokes(self, notebook_id: str, section_id: str, page_id: str) -> list[dict]:
+        path = self._ink_json_path(notebook_id, section_id, page_id)
+        payload = self._read_json(path, {})
+        strokes = payload.get("strokes", [])
+        return strokes if isinstance(strokes, list) else []
+
+    def save_ink_strokes(self, notebook_id: str, section_id: str, page_id: str, strokes: list[dict]) -> None:
+        path = self._ink_json_path(notebook_id, section_id, page_id)
+        data = {"page_id": page_id, "updated_at": utc_now_iso(), "strokes": strokes}
+        self._write_json(path, data)
+
+    def save_ink_image(self, notebook_id: str, section_id: str, page_id: str, image: Any) -> None:
+        path = self._ink_png_path(notebook_id, section_id, page_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(path, format="PNG")
+
     def _page_path(self, notebook_id: str, section_id: str, page_id: str) -> Path:
         return self.notebooks_dir / notebook_id / "sections" / section_id / "pages" / f"{page_id}.json"
+
+    def _ink_json_path(self, notebook_id: str, section_id: str, page_id: str) -> Path:
+        return self.notebooks_dir / notebook_id / "sections" / section_id / "pages" / f"{page_id}_ink.json"
+
+    def _ink_png_path(self, notebook_id: str, section_id: str, page_id: str) -> Path:
+        return self.notebooks_dir / notebook_id / "sections" / section_id / "pages" / f"{page_id}_ink.png"
 
     @staticmethod
     def _read_json(path: Path, fallback):
@@ -214,10 +253,24 @@ class WindowsNoteApp(tk.Tk):
         self.page_cache = []
         self.is_loading_page = False
         self.autosave_job = None
+        self.ink_strokes = []
+        self.current_stroke = None
+        self.current_tool = tk.StringVar(value="pen")
+        self.pen_size_var = tk.IntVar(value=4)
+        self.pen_color = DEFAULT_INK_COLOR
+        self.pillow_warning_shown = False
 
         self._build_ui()
         self._bind_shortcuts()
         self.refresh_notebooks()
+        if not PIL_AVAILABLE:
+            self.after(
+                200,
+                lambda: messagebox.showwarning(
+                    "Pillow Missing",
+                    "Ink PNG export requires Pillow.\nRun: python -m pip install pillow",
+                ),
+            )
 
     def _load_config(self) -> dict:
         if not CONFIG_FILE.exists():
@@ -264,6 +317,22 @@ class WindowsNoteApp(tk.Tk):
         ttk.Button(toolbar, text="U", command=lambda: self.apply_text_tag("underline")).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Highlight", command=lambda: self.apply_text_tag("highlight")).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Save", command=self.save_current_page).pack(side=tk.LEFT, padx=8)
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+        ttk.Label(toolbar, text="Ink:").pack(side=tk.LEFT)
+        ttk.Radiobutton(toolbar, text="Pen", value="pen", variable=self.current_tool).pack(side=tk.LEFT, padx=2)
+        ttk.Radiobutton(toolbar, text="Eraser", value="eraser", variable=self.current_tool).pack(side=tk.LEFT, padx=2)
+        for color in ("#111827", "#2563eb", "#dc2626", "#15803d"):
+            tk.Button(
+                toolbar,
+                width=2,
+                bg=color,
+                relief=tk.GROOVE,
+                command=lambda c=color: self.set_ink_color(c),
+            ).pack(side=tk.LEFT, padx=1)
+        ttk.Label(toolbar, text="Size").pack(side=tk.LEFT, padx=(8, 2))
+        self.pen_size_spin = ttk.Spinbox(toolbar, from_=1, to=24, width=4, textvariable=self.pen_size_var)
+        self.pen_size_spin.pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Clear Ink", command=self.clear_ink).pack(side=tk.LEFT, padx=6)
 
         paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -307,9 +376,23 @@ class WindowsNoteApp(tk.Tk):
         self.page_title_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
         self.page_title_entry.bind("<KeyRelease>", self._on_page_text_change)
 
-        self.editor = tk.Text(right, wrap=tk.WORD, undo=True)
-        self.editor.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.editor_tabs = ttk.Notebook(right)
+        self.editor_tabs.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+
+        text_tab = ttk.Frame(self.editor_tabs)
+        ink_tab = ttk.Frame(self.editor_tabs)
+        self.editor_tabs.add(text_tab, text="Text")
+        self.editor_tabs.add(ink_tab, text="Ink")
+
+        self.editor = tk.Text(text_tab, wrap=tk.WORD, undo=True)
+        self.editor.pack(fill=tk.BOTH, expand=True)
         self.editor.bind("<<Modified>>", self._on_text_modified)
+
+        self.ink_canvas = tk.Canvas(ink_tab, bg="white", cursor="pencil")
+        self.ink_canvas.pack(fill=tk.BOTH, expand=True)
+        self.ink_canvas.bind("<ButtonPress-1>", self.on_ink_press)
+        self.ink_canvas.bind("<B1-Motion>", self.on_ink_drag)
+        self.ink_canvas.bind("<ButtonRelease-1>", self.on_ink_release)
 
         self._setup_text_tags()
 
@@ -359,6 +442,106 @@ class WindowsNoteApp(tk.Tk):
         else:
             self.editor.tag_add(tag_name, start, end)
         self._queue_autosave()
+
+    def set_ink_color(self, color: str):
+        self.pen_color = color
+        self.current_tool.set("pen")
+
+    def clear_ink(self):
+        self.ink_strokes = []
+        self.ink_canvas.delete("all")
+        self._queue_autosave()
+
+    def on_ink_press(self, event):
+        if self.is_loading_page:
+            return
+        width = int(self.pen_size_var.get())
+        if self.current_tool.get() == "eraser":
+            color = "white"
+            width = max(8, width * 2)
+        else:
+            color = self.pen_color
+        self.current_stroke = {"tool": self.current_tool.get(), "color": color, "width": width, "points": [[event.x, event.y]]}
+
+    def on_ink_drag(self, event):
+        if not self.current_stroke:
+            return
+        points = self.current_stroke["points"]
+        last_x, last_y = points[-1]
+        points.append([event.x, event.y])
+        self.ink_canvas.create_line(
+            last_x,
+            last_y,
+            event.x,
+            event.y,
+            fill=self.current_stroke["color"],
+            width=self.current_stroke["width"],
+            capstyle=tk.ROUND,
+            smooth=True,
+        )
+
+    def on_ink_release(self, event):
+        if not self.current_stroke:
+            return
+        points = self.current_stroke["points"]
+        if len(points) == 1:
+            x, y = points[0]
+            half = max(1, self.current_stroke["width"] // 2)
+            self.ink_canvas.create_oval(
+                x - half,
+                y - half,
+                x + half,
+                y + half,
+                outline=self.current_stroke["color"],
+                fill=self.current_stroke["color"],
+            )
+        self.ink_strokes.append(self.current_stroke)
+        self.current_stroke = None
+        self._queue_autosave()
+
+    def _draw_stroke(self, stroke: dict):
+        points = stroke.get("points", [])
+        color = stroke.get("color", DEFAULT_INK_COLOR)
+        width = max(1, int(stroke.get("width", 2)))
+        if len(points) == 1:
+            x, y = points[0]
+            half = max(1, width // 2)
+            self.ink_canvas.create_oval(x - half, y - half, x + half, y + half, outline=color, fill=color)
+            return
+        if len(points) < 2:
+            return
+        flattened = []
+        for x, y in points:
+            flattened.extend((x, y))
+        self.ink_canvas.create_line(*flattened, fill=color, width=width, capstyle=tk.ROUND, smooth=True)
+
+    def _load_ink_for_current_page(self):
+        self.ink_canvas.delete("all")
+        self.ink_strokes = []
+        if not (self.selected_notebook_id and self.selected_section_id and self.selected_page_id):
+            return
+        self.ink_strokes = self.storage.load_ink_strokes(
+            self.selected_notebook_id, self.selected_section_id, self.selected_page_id
+        )
+        for stroke in self.ink_strokes:
+            self._draw_stroke(stroke)
+
+    def _render_ink_image(self):
+        width = max(1, self.ink_canvas.winfo_width())
+        height = max(1, self.ink_canvas.winfo_height())
+        image = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(image)
+        for stroke in self.ink_strokes:
+            points = [tuple(p) for p in stroke.get("points", [])]
+            color = stroke.get("color", DEFAULT_INK_COLOR)
+            line_width = max(1, int(stroke.get("width", 2)))
+            if len(points) == 1:
+                x, y = points[0]
+                half = max(1, line_width // 2)
+                draw.ellipse((x - half, y - half, x + half, y + half), fill=color, outline=color)
+            elif len(points) > 1:
+                draw.line(points, fill=color, width=line_width, joint="curve")
+        return image
 
     def refresh_notebooks(self):
         self.tree.delete(*self.tree.get_children())
@@ -505,6 +688,7 @@ class WindowsNoteApp(tk.Tk):
                     except tk.TclError:
                         pass
             self.editor.edit_modified(False)
+            self._load_ink_for_current_page()
         finally:
             self.is_loading_page = False
 
@@ -571,6 +755,26 @@ class WindowsNoteApp(tk.Tk):
             content,
             formatting,
         )
+        self.storage.save_ink_strokes(
+            self.selected_notebook_id,
+            self.selected_section_id,
+            self.selected_page_id,
+            self.ink_strokes,
+        )
+        if PIL_AVAILABLE:
+            image = self._render_ink_image()
+            self.storage.save_ink_image(
+                self.selected_notebook_id,
+                self.selected_section_id,
+                self.selected_page_id,
+                image,
+            )
+        elif not self.pillow_warning_shown:
+            self.pillow_warning_shown = True
+            messagebox.showwarning(
+                "PNG Export Disabled",
+                "Ink is saved as strokes, but PNG export needs Pillow.\nRun: python -m pip install pillow",
+            )
         self.refresh_pages()
 
     def _collect_formatting_ranges(self) -> list[dict]:
@@ -584,6 +788,8 @@ class WindowsNoteApp(tk.Tk):
     def _clear_editor(self):
         self.page_title_var.set("")
         self.editor.delete("1.0", tk.END)
+        self.ink_canvas.delete("all")
+        self.ink_strokes = []
 
     def change_storage_folder(self):
         selected = filedialog.askdirectory(initialdir=str(self.storage_root), title="Choose note storage folder")
