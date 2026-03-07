@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import shutil
 import uuid
@@ -34,7 +34,7 @@ CONFIG_FILE = Path(__file__).resolve().parent.parent / "config.json"
 DEFAULT_DATA_ROOT = "./local_notes"
 TEXT_TAGS = ("bold", "italic", "underline", "highlight")
 DEFAULT_INK_COLOR = "#111827"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 PAGE_CANVAS_WIDTH = 8000
 PAGE_CANVAS_HEIGHT = 12000
 
@@ -419,7 +419,7 @@ class WindowsNoteApp(tk.Tk):
         ttk.Button(nb_btns, text="Delete", command=self.delete_tree_item).pack(side=tk.LEFT, padx=2)
 
         ttk.Label(pages_frame, text="Pages").pack(anchor=tk.W)
-        self.pages_list = tk.Listbox(pages_frame)
+        self.pages_list = tk.Listbox(pages_frame, exportselection=False)
         self.pages_list.pack(fill=tk.BOTH, expand=True)
         self.pages_list.bind("<<ListboxSelect>>", self.on_page_select)
 
@@ -930,6 +930,20 @@ class WindowsNoteApp(tk.Tk):
         self.page_cache = pages
         for page in pages:
             self.pages_list.insert(tk.END, page["title"])
+        if self.selected_page_id:
+            if not self._select_page_in_list(self.selected_page_id):
+                self.selected_page_id = None
+                self._clear_editor()
+
+    def _select_page_in_list(self, page_id: str) -> bool:
+        for idx, page in enumerate(self.page_cache):
+            if page["id"] == page_id:
+                self.pages_list.selection_clear(0, tk.END)
+                self.pages_list.selection_set(idx)
+                self.pages_list.activate(idx)
+                self.pages_list.see(idx)
+                return True
+        return False
 
     def add_notebook(self):
         title = simpledialog.askstring("New Notebook", "Notebook title:", parent=self)
@@ -967,12 +981,7 @@ class WindowsNoteApp(tk.Tk):
         self.selected_page_id = page_id
         # Keep UI state aligned with the newly created page to avoid stale autosave overwriting its title.
         self.load_current_page()
-        for idx, page in enumerate(self.page_cache):
-            if page["id"] == page_id:
-                self.pages_list.selection_clear(0, tk.END)
-                self.pages_list.selection_set(idx)
-                self.pages_list.activate(idx)
-                break
+        self._select_page_in_list(page_id)
 
     def rename_tree_item(self):
         sel = self.tree.selection()
@@ -1018,18 +1027,21 @@ class WindowsNoteApp(tk.Tk):
         self.refresh_pages()
 
     def on_page_select(self, _event=None):
-        if self.autosave_job:
-            self.after_cancel(self.autosave_job)
-            self.autosave_job = None
-        if self.selected_page_id:
-            self.save_current_page()
-
         sel = self.pages_list.curselection()
         if not sel:
             return
+        if sel[0] >= len(self.page_cache):
+            return
+        new_page_id = self.page_cache[sel[0]]["id"]
 
-        page = self.page_cache[sel[0]]
-        self.selected_page_id = page["id"]
+        if self.autosave_job:
+            self.after_cancel(self.autosave_job)
+            self.autosave_job = None
+        if self.selected_page_id and self.selected_page_id != new_page_id:
+            self.save_current_page()
+
+        self.selected_page_id = new_page_id
+        self._select_page_in_list(new_page_id)
         self.load_current_page()
 
     def load_current_page(self):
