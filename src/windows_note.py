@@ -302,6 +302,7 @@ class WindowsNoteApp(tk.Tk):
         self.page_cache = []
         self.is_loading_page = False
         self.autosave_job = None
+        self.loading_depth = 0
         self.ink_strokes = []
         self.ink_images = []
         self.ink_image_cache = {}
@@ -362,6 +363,10 @@ class WindowsNoteApp(tk.Tk):
         self.search_entry = ttk.Entry(top, textvariable=self.search_var, width=45)
         self.search_entry.pack(side=tk.LEFT, padx=(6, 12))
         self.search_entry.bind("<KeyRelease>", lambda _e: self.refresh_pages())
+
+        self.loading_text_var = tk.StringVar(value="")
+        self.loading_label = ttk.Label(top, textvariable=self.loading_text_var)
+        self.loading_bar = ttk.Progressbar(top, mode="indeterminate", length=160)
 
         self.storage_label_var = tk.StringVar(value=f"Storage: {self.storage_root}")
         ttk.Label(top, textvariable=self.storage_label_var).pack(side=tk.LEFT, padx=(8, 0))
@@ -531,6 +536,27 @@ class WindowsNoteApp(tk.Tk):
         else:
             self.editor.tag_add(tag_name, start, end)
         self._queue_autosave()
+
+    def _show_loading(self, message: str = "Loading page..."):
+        self.loading_depth += 1
+        if self.loading_depth == 1:
+            self.loading_text_var.set(message)
+            self.loading_label.pack(side=tk.RIGHT, padx=(8, 4))
+            self.loading_bar.pack(side=tk.RIGHT, padx=(0, 8))
+            self.loading_bar.start(12)
+            self.update_idletasks()
+
+    def _hide_loading(self):
+        if self.loading_depth <= 0:
+            self.loading_depth = 0
+            return
+        self.loading_depth -= 1
+        if self.loading_depth == 0:
+            self.loading_bar.stop()
+            self.loading_bar.pack_forget()
+            self.loading_label.pack_forget()
+            self.loading_text_var.set("")
+            self.update_idletasks()
 
     def set_ink_color(self, color: str):
         self.pen_color = color
@@ -761,6 +787,7 @@ class WindowsNoteApp(tk.Tk):
         )
         self.ink_image_items[image_id] = item_id
         self._raise_ink_layers()
+        self.update_idletasks()
 
     def _select_image(self, image_id: str):
         self.selected_image_id = image_id
@@ -841,10 +868,14 @@ class WindowsNoteApp(tk.Tk):
         payload = self.storage.load_ink_payload(self.selected_notebook_id, self.selected_section_id, self.selected_page_id)
         self.ink_strokes = payload.get("strokes", [])
         self.ink_images = payload.get("images", [])
-        for stroke in self.ink_strokes:
+        for i, stroke in enumerate(self.ink_strokes):
             self._draw_stroke(stroke)
-        for image_meta in self.ink_images:
+            if i % 25 == 0:
+                self.update_idletasks()
+        for i, image_meta in enumerate(self.ink_images):
             self._draw_canvas_image(image_meta)
+            if i % 3 == 0:
+                self.update_idletasks()
 
     def _render_ink_image(self):
         region = self.ink_canvas.cget("scrollregion")
@@ -1034,19 +1065,24 @@ class WindowsNoteApp(tk.Tk):
             return
         new_page_id = self.page_cache[sel[0]]["id"]
 
-        if self.autosave_job:
-            self.after_cancel(self.autosave_job)
-            self.autosave_job = None
-        if self.selected_page_id and self.selected_page_id != new_page_id:
-            self.save_current_page()
+        self._show_loading("Loading page...")
+        try:
+            if self.autosave_job:
+                self.after_cancel(self.autosave_job)
+                self.autosave_job = None
+            if self.selected_page_id and self.selected_page_id != new_page_id:
+                self.save_current_page()
 
-        self.selected_page_id = new_page_id
-        self._select_page_in_list(new_page_id)
-        self.load_current_page()
+            self.selected_page_id = new_page_id
+            self._select_page_in_list(new_page_id)
+            self.load_current_page()
+        finally:
+            self._hide_loading()
 
     def load_current_page(self):
         if not (self.selected_notebook_id and self.selected_section_id and self.selected_page_id):
             return
+        self._show_loading("Loading page...")
         page = self.storage.load_page(self.selected_notebook_id, self.selected_section_id, self.selected_page_id)
 
         self.is_loading_page = True
@@ -1055,6 +1091,7 @@ class WindowsNoteApp(tk.Tk):
             self._load_ink_for_current_page()
         finally:
             self.is_loading_page = False
+            self._hide_loading()
 
     def rename_page(self):
         if not (self.selected_notebook_id and self.selected_section_id):
