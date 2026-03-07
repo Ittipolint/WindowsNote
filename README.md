@@ -13,7 +13,7 @@ The app stores all notes on your local machine folder (configurable) using JSON 
 - Notebook > Section > Page structure
 - Rich text formatting (bold, italic, underline, highlight)
 - Ink canvas for stylus/mouse drawing
-- Pen color, stroke size, and eraser tools
+- Pen color, stroke size, and stroke eraser tools (Surface Pen supported)
 - Quick page search
 - Autosave and manual save (`Ctrl+S`)
 - Rename and delete notebook/section/page

@@ -21,6 +21,7 @@ CONFIG_FILE = Path(__file__).resolve().parent.parent / "config.json"
 DEFAULT_DATA_ROOT = "./local_notes"
 TEXT_TAGS = ("bold", "italic", "underline", "highlight")
 DEFAULT_INK_COLOR = "#111827"
+APP_VERSION = "1.1.0"
 
 
 def utc_now_iso() -> str:
@@ -239,7 +240,7 @@ class LocalNoteStorage:
 class WindowsNoteApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("WindowsNote - OneNote-style Local Notes")
+        self.title(f"WindowsNote v{APP_VERSION} - OneNote-style Local Notes")
         self.geometry("1280x800")
         self.minsize(980, 620)
 
@@ -333,6 +334,7 @@ class WindowsNoteApp(tk.Tk):
         self.pen_size_spin = ttk.Spinbox(toolbar, from_=1, to=24, width=4, textvariable=self.pen_size_var)
         self.pen_size_spin.pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Clear Ink", command=self.clear_ink).pack(side=tk.LEFT, padx=6)
+        ttk.Label(toolbar, text=f"Version {APP_VERSION}").pack(side=tk.RIGHT, padx=4)
 
         paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -455,15 +457,17 @@ class WindowsNoteApp(tk.Tk):
     def on_ink_press(self, event):
         if self.is_loading_page:
             return
-        width = int(self.pen_size_var.get())
         if self.current_tool.get() == "eraser":
-            color = "white"
-            width = max(8, width * 2)
-        else:
-            color = self.pen_color
-        self.current_stroke = {"tool": self.current_tool.get(), "color": color, "width": width, "points": [[event.x, event.y]]}
+            self.current_stroke = None
+            self._erase_strokes_at(event.x, event.y)
+            return
+        width = int(self.pen_size_var.get())
+        self.current_stroke = {"tool": "pen", "color": self.pen_color, "width": width, "points": [[event.x, event.y]]}
 
     def on_ink_drag(self, event):
+        if self.current_tool.get() == "eraser":
+            self._erase_strokes_at(event.x, event.y)
+            return
         if not self.current_stroke:
             return
         points = self.current_stroke["points"]
@@ -481,6 +485,9 @@ class WindowsNoteApp(tk.Tk):
         )
 
     def on_ink_release(self, event):
+        if self.current_tool.get() == "eraser":
+            self.current_stroke = None
+            return
         if not self.current_stroke:
             return
         points = self.current_stroke["points"]
@@ -498,6 +505,50 @@ class WindowsNoteApp(tk.Tk):
         self.ink_strokes.append(self.current_stroke)
         self.current_stroke = None
         self._queue_autosave()
+
+    def _erase_strokes_at(self, x: int, y: int):
+        radius = max(8, int(self.pen_size_var.get()) * 2)
+        radius_sq = radius * radius
+        original_count = len(self.ink_strokes)
+        kept = []
+        for stroke in self.ink_strokes:
+            points = stroke.get("points", [])
+            if len(points) < 2:
+                if points:
+                    px, py = points[0]
+                    if (px - x) * (px - x) + (py - y) * (py - y) <= radius_sq:
+                        continue
+                kept.append(stroke)
+                continue
+
+            hit = False
+            for i in range(1, len(points)):
+                x1, y1 = points[i - 1]
+                x2, y2 = points[i]
+                if self._distance_sq_point_to_segment(x, y, x1, y1, x2, y2) <= radius_sq:
+                    hit = True
+                    break
+            if not hit:
+                kept.append(stroke)
+
+        if len(kept) != original_count:
+            self.ink_strokes = kept
+            self.ink_canvas.delete("all")
+            for stroke in self.ink_strokes:
+                self._draw_stroke(stroke)
+            self._queue_autosave()
+
+    @staticmethod
+    def _distance_sq_point_to_segment(px, py, x1, y1, x2, y2):
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0 and dy == 0:
+            return (px - x1) * (px - x1) + (py - y1) * (py - y1)
+        t = ((px - x1) * dx + (py - y1) * dy) / float(dx * dx + dy * dy)
+        t = max(0.0, min(1.0, t))
+        cx = x1 + t * dx
+        cy = y1 + t * dy
+        return (px - cx) * (px - cx) + (py - cy) * (py - cy)
 
     def _draw_stroke(self, stroke: dict):
         points = stroke.get("points", [])
