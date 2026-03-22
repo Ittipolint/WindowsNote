@@ -19,9 +19,8 @@ The app stores all notes on your local machine folder (configurable) using JSON 
 - Pen color, stroke size, and stroke eraser tools (Surface Pen supported)
 - Insert image into page, select/move/delete image position
 - Print page to PDF (paper size via dropdown: A4, LETTER, LEGAL, A5)
-- Save As (export `.wnote.json`)
 - Quick page search
-- Autosave and manual save (`Ctrl+S`)
+- Autosave only (no manual save button)
 - Rename and delete notebook/section/page
 - Choose a custom local storage folder
 
